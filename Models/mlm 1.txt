@@ -1,0 +1,55 @@
+
+# Model 1: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope 
+
+model{
+
+  # Person-level model
+  for(i in 1:N){
+
+    # Random intercept and slope
+    eps2[i, 1:2] ~ dmnorm(mu.eps2[1:2], psi.eps2[1:2, 1:2])
+
+    # Observation model
+    for(t in 1:Nt){
+      y[i, t] ~ dnorm(mu.y[i, t], psi.y)
+    }
+
+    # Person-specific AR(1) parameters
+    alpha.new[i] <- alpha + eps2[i, 1]
+    beta.new[i]  <- beta  + eps2[i, 2]
+
+    # Initial mean
+    mu.y[i, 1] <- alpha.new[i]
+
+    # AR(1) mean structure
+    for(t in 2:Nt){
+      y.center[i, t-1] <- y[i, t-1] - alpha.new[i]
+      mu.y[i, t] <- alpha.new[i] + beta.new[i] * y.center[i, t-1]
+    }
+
+  }
+
+  # Residual precision
+  psi.y ~ dgamma(1, 1)
+
+  # Precision matrix for random effects
+  psi.eps2[1:2, 1:2] ~ dwish(psi0, 2)
+
+  # Population-level AR(1) parameters
+  alpha ~ dnorm(0, 0.1)
+  beta  ~ dunif(-1, 1)
+
+  # Variance transformations
+  sigma.y <- 1 / psi.y
+  sigma.eps2[1:2, 1:2] <- inverse(psi.eps2[1:2, 1:2])
+
+  # Correlations among random effects
+  for(k in 1:2){
+    for(j in 1:2){
+      rho.eps2[k, j] <-
+        sigma.eps2[k, j] /
+        sqrt(sigma.eps2[k, k] * sigma.eps2[j, j])
+    }
+  }
+
+}

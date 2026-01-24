@@ -1,0 +1,777 @@
+---
+title: "LDA CFA and AR(1)"
+author: "Renee Soler"
+output: html_document
+---
+
+
+```{r}
+library(R2jags)
+library(here)
+```
+
+# Analysis 1: Confirmatory Factor Analysis 
+
+## Data Preparation
+
+data in tutorial is in 3 dimensions and ours is in long format so im reshaping so its easier to use down the line. 
+
+I also reverse two items because theyre reversed from our construct of the cultural conservative shift 
+
+We also mean center the answers because the tutorial used them this way, also we go low ESS on the first try and some sources said that mean centering should help (it did) 
+
+```{r}
+# Read in the data from the file
+table <- read.csv(here("yllanon.csv"))
+
+data <- table
+
+id_var  <- "id"
+time_var <- "wave"
+item_vars <- c("abort","adopt","imm") 
+
+# removing "dont know" and "I haven’t thought much about it" responses
+
+data$abort[data$abort %in% c(5, 6)] <- NA
+
+data$adopt[data$adopt %in% c(8, 9)] <- NA
+
+data$imm[data$imm %in% c(8, 9)] <- NA
+
+#reversing abortion and adoption variables since they point opposite the construct of conservative cultural shift
+
+data$abort <- 5 - data$abort
+data$adopt <- 8 - data$adopt
+
+# item means for descriptive statistics 
+item_means <- sapply(item_vars, function(v) mean(data[[v]], na.rm = TRUE))
+print(round(item_means, 2))
+
+
+# centering data because the tutorial data is centered and im trying to fix low ESS (online it said this should help)
+
+# Compute wave-1 means
+wave1_means <- sapply(item_vars, function(v) {
+  mean(data[data$wave == 1, v], na.rm = TRUE)
+})
+
+# Center all waves using wave-1 means
+for (v in item_vars) {
+  data[[v]] <- data[[v]] - wave1_means[v]
+}
+
+# had to scale every item to unit of std. dev. since i had issues with cnvergence down the line in MLM, and if i scale the models are no longer comaprable so we have to scale from the start.
+
+item_sds <- sapply(item_vars, function(v) sd(data[[v]], na.rm = TRUE))
+
+for (v in item_vars) {
+  data[[v]] <- data[[v]] / item_sds[v]
+}
+
+## data in tutorial is in 3 dimensions and ours is in long format so im reshaping so its easier to use down the line. 
+ 
+
+# Unique ids and waves
+ids   <- sort(unique(data[[id_var]]))
+times <- sort(unique(data[[time_var]]))
+
+N <- length(ids)
+T <- length(times)
+J <- length(item_vars)
+
+# array [person, time, item]
+y_data <- array(NA_real_, dim = c(N, T, J),
+                dimnames = list(ids, times, item_vars))
+
+for (j in seq_along(item_vars)) {
+  tmp <- data[, c(id_var, time_var, item_vars[j])]
+  names(tmp) <- c("id", "time", "y")
+
+  wide <- reshape(tmp, idvar = "id", timevar = "time", direction = "wide")
+
+  wide <- wide[match(ids, wide$id), , drop = FALSE]
+  col_order <- paste0("y.", times)
+
+  y_data[, , j] <- as.matrix(wide[, col_order])
+}
+
+
+# Save the number participants (N=552)
+
+num_obs  <- dim(y_data)[1]
+
+# Save the number of time points (num_time=26)
+
+num_time <- dim(y_data)[2]
+
+# Number of items (3)
+
+num_items <- dim(y_data)[3]
+
+
+```
+
+## Prepare the first time point t=1 and last time point t=26
+
+We need to check if the 3 factor structure is stable throughout the waves. For this we will run a CFA on the first and last time point to check the factor structure and loadings. The JAGS model with the priors and distributions is stored in a TXT file like in the tutorial. 
+
+One factor model with 3 items:
+
+f1 ~ abort + adopt + imm
+
+the factor corresponds to a conservative cultural shift happening during the covid/the time of the survey
+
+
+```{r}
+
+# Store measurement at time point t=1
+y_data_t1 <- y_data[, 1, ]
+
+
+# Prepare data at time point t=1 for jags
+data_jags1 <- list(
+  N = num_obs, 
+  J = ncol(y_data_t1),
+  y = y_data_t1 # data at time point t=1
+)
+
+
+# Store measurement at time point t=26
+y_data_tlast <- y_data[, 26, ]
+
+
+# Prepare data at time point t=26 for jags
+data_jagslast <- list(
+  N = num_obs, 
+  J = ncol(y_data_tlast),
+  y = y_data_tlast # data at time point t=26
+)
+
+```
+# Parameter estimates for t=1
+
+```{r}
+#  parameters to estimate
+params <- c(
+  "lambda.y", "nu.y", "sigma.eps", "sigma.eta", "lambda.y.strd"
+)
+
+# estimate at t=1
+model1 <- jags.parallel(
+  data = data_jags1, 
+  parameters.to.save = params, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "cfa_model.txt")
+)
+
+est1 <- model1$BUGSoutput$summary
+round(est1, 2)
+
+# results 
+#                    mean    sd    2.5%     25%     50%     75%   97.5% Rhat n.eff
+# deviance         3800.29 45.30 3711.50 3770.30 3800.34 3830.25 3889.94 1.00  4000
+# lambda.y[1]         0.85  0.12    0.63    0.77    0.84    0.92    1.10 1.00  1100
+# lambda.y[2]         0.91  0.13    0.68    0.82    0.90    0.99    1.19 1.01   560
+# lambda.y.strd[1]    0.66  0.05    0.56    0.63    0.66    0.70    0.76 1.01   490
+# lambda.y.strd[2]    0.54  0.05    0.44    0.51    0.54    0.57    0.63 1.00 10000
+# lambda.y.strd[3]    0.60  0.05    0.50    0.57    0.60    0.64    0.70 1.00  1200
+# nu.y[1]             0.01  0.05   -0.08   -0.02    0.01    0.05    0.11 1.00 12000
+# nu.y[2]             0.00  0.05   -0.10   -0.04    0.00    0.03    0.09 1.00  4600
+# sigma.eps[1]        0.58  0.07    0.44    0.53    0.58    0.63    0.72 1.00   650
+# sigma.eps[2]        0.77  0.07    0.65    0.73    0.77    0.82    0.91 1.00  9500
+# sigma.eps[3]        0.65  0.07    0.52    0.61    0.65    0.70    0.78 1.00  1600
+# sigma.eta           0.46  0.08    0.31    0.40    0.45    0.51    0.62 1.01   640
+
+```
+## interpretation and loadings 
+
+standardized factor loadings: 0.66 (adopt) 0.54 (abort) 0.60 (imm)
+-> high factor loadings 
+
+minimal effective sample size: 490
+-> Good enough
+
+Rhat statistic: 1.006119
+-> below 1.1, good convergence
+
+
+```{r}
+
+# Check for range of standardized factor loadings
+range(est1[paste0("lambda.y.strd[", 1:3, "]"), 1])
+# output: 0.5399746 0.6621621
+
+# Check for the minimal effective sample size (validate convergence)
+min(est1[est1[, "n.eff"] > 1, "n.eff"])
+# output: 490 
+
+
+# Check for smallest Rhat statistic (validate convergence)
+max(est1[est1[, "n.eff"] > 1, "Rhat"])
+# output: 1.006119
+
+
+
+```
+
+
+
+## Parameter estimates for t=26
+
+```{r}
+
+# estimate at t=26
+model2 <- jags.parallel(
+  data = data_jagslast, 
+  parameters.to.save = params, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "cfa_model.txt")
+)
+
+est2 <- model2$BUGSoutput$summary
+round(est2, 2)
+# results
+
+#                   mean    sd    2.5%     25%     50%     75%   97.5% Rhat n.eff
+# deviance         2195.13 60.31 2058.73 2161.24 2201.85 2236.02 2295.81 1.01   370
+# lambda.y[1]         0.78  0.10    0.59    0.70    0.77    0.84    1.00 1.01   520
+# lambda.y[2]         0.59  0.09    0.42    0.53    0.58    0.65    0.77 1.00  1200
+# lambda.y.strd[1]    0.81  0.05    0.70    0.77    0.81    0.84    0.90 1.01   350
+# lambda.y.strd[2]    0.63  0.05    0.53    0.60    0.63    0.67    0.73 1.00  1100
+# lambda.y.strd[3]    0.48  0.05    0.37    0.45    0.48    0.52    0.59 1.00 12000
+# nu.y[1]            -0.09  0.05   -0.19   -0.13   -0.09   -0.06    0.00 1.00 11000
+# nu.y[2]            -0.17  0.05   -0.27   -0.20   -0.17   -0.13   -0.07 1.00 20000
+# sigma.eps[1]        0.36  0.08    0.20    0.30    0.35    0.41    0.52 1.01   350
+# sigma.eps[2]        0.58  0.07    0.45    0.54    0.58    0.63    0.72 1.00  1500
+# sigma.eps[3]        0.74  0.07    0.62    0.70    0.74    0.79    0.88 1.00 16000
+# sigma.eta           0.67  0.11    0.47    0.59    0.66    0.74    0.89 1.01   560
+
+
+```
+
+## interpretation and loadings 
+
+standardized factor loadings: 0.81 (adopt) 0.63 (abort) 0.48 (imm)
+-> moderate to high factor loadings 
+
+minimal effective sample size: 350
+-> good enough
+
+Rhat statistic
+1.008952
+-> below 1.1 
+
+Loadings have similar magnitudes in both time points. We can conclude the factor structure remains in both time points. 
+
+```{r}
+# Check for range of standardized factor loadings
+range(est2[paste0("lambda.y.strd[", 1:3, "]"), 1])
+# output: 0.4826855 0.8053455
+
+# Check for the minimal effective sample size (validate convergence)
+min(est2[est2[, "n.eff"] > 1, "n.eff"])
+# output: 350
+
+
+# Check for smallest Rhat statistic (validate convergence)
+max(est2[est2[, "n.eff"] > 1, "Rhat"])
+# output:  1.008952
+
+```
+
+
+
+### convergence checks
+
+The gelman-rubin plots look good, shrink factors below 1.1 thereshold
+
+Trace plots have a bit of a trend after burn-in, specially in T=1; but im not sure if its drastic enough? also some chains deviate a little. need a second opinion....
+
+Density plots look good in both time points, smooth and single peak. 
+
+
+```{r}
+#convergence t=1
+model1_conv <- jags.parallel(
+  data = data_jags1, 
+  parameters.to.save = params,
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 1, 
+  model.file = here("models", "cfa_model.txt")
+)
+samps1 <- as.mcmc(model1_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","cfa1_gelmanplot.pdf"))
+# looks good!
+
+
+par(new = FALSE)
+for (v in 1:nvar(samps1)) {
+  gelman.plot(samps1[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = TRUE)
+}
+
+abline(h = 1.1)
+dev.off() 
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","cfa1_xyplot.pdf"), pointsize = 6)
+# good mixing of chains and only one peak per parameter estimated
+
+plot(samps1)
+dev.off() 
+
+
+
+#convergence t=26
+
+model2_conv <- jags.parallel(
+  data = data_jagslast, 
+  parameters.to.save = params, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 1,
+  model.file = here("models", "cfa_model.txt")
+)
+samps2 <- as.mcmc(model2_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","cfa2_gelmanplot.pdf"))
+# good
+
+par(new = FALSE)
+for (v in 1:nvar(samps2)) {
+  gelman.plot(samps2[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = TRUE)
+}
+abline(h = 1.1)
+dev.off() 
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","cfa2_xyplot.pdf"), pointsize = 6)
+# good mixing, single peaks 
+
+plot(samps2)
+dev.off() 
+
+
+```
+
+# Analysis 2: AR(1) Model with single item (1 person)
+
+For this analysis we first look at an AR(1) model with a single observed outcome (so an item from our model) on a single participant over all time points. With this we can look at the temporal dependencies on the data, then we make a decision on if we need to add MA effect. Afterwards we can proceed with a measurement model with all items and a single factor based on the results from the previous one. 
+
+## Data Preparation 
+
+First, we plot the average response of all items across waves to select the one with the most clear trend, this is helpful for seeing the pattern in responses. 
+
+Then, we need to select a good candidate for the AR(1) model, this should be a participant who filled the survey at all time points, and hopefully with a visible trend on one of our indicators. 
+
+
+```{r}
+
+# we plot avg score per item
+
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+
+item_means <- data %>%
+  select(wave, all_of(item_vars)) %>%
+  pivot_longer(cols = all_of(item_vars),
+    names_to = "item",
+    values_to = "value"
+  ) %>%
+  group_by(item, wave) %>%
+  summarise(mean_value = mean(value, na.rm = TRUE),
+    n = sum(!is.na(value)),
+    .groups = "drop"
+  )
+
+ggplot(item_means,
+       aes(x = wave, y = mean_value, color = item)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    x = "Wave", y = "Average", color = "Item") +
+  theme_minimal() +
+  theme(legend.position = "top"
+  )
+
+# when looking at the plot we must remember the responses are mean centered. 
+
+
+
+```
+
+in the plot we can see that imm has a clearer downward trend in the responses, so we choose this item going forward. (We could also choose adopt, since they have similar trends, this is a bit arbitrary) Now we have to choose a participant for the 1 item 1 person ARMA model
+
+## Participant selection
+
+For this we want someone who filled the survey in all waves and has changed their answer over time
+
+
+```{r}
+# now we filter only participants who had filled the survey in all waves....
+
+waves_num <- length(sort(unique(data$wave)))
+
+imm_no_NA<- data %>%
+  select(id, wave, imm) %>%
+  group_by(id) %>%
+  filter(n_distinct(wave) == waves_num,      
+    !any(is.na(imm))) %>%  
+  ungroup()
+
+n_distinct(imm_no_NA$id) 
+# 184 participants left
+
+# now we substract the average of the first five responses to the avg of the last 5 to see which participants have changed their mind most clearly 
+
+# they dont do this in the tutorial, they just plot the time series of responses, but we have too many participants and too many waves to do this by eye so i had to improvise.... and this seems logical??? 
+
+imm_trends <- imm_no_NA %>%
+  group_by(id) %>%
+  summarise(
+    mean_first5 = mean(imm[order(wave)][1:5], na.rm = TRUE),
+    mean_last5  = mean(imm[order(wave)][(n() - 4):n()], na.rm = TRUE),
+    diff        = mean_last5 - mean_first5,
+    abs_diff    = abs(diff),
+    .groups = "drop"
+  ) 
+
+# i want to see the top 5 ids in "difference" between starting and ending responses
+
+top_5 <- imm_trends %>%
+  arrange(desc(abs_diff)) %>%
+  slice(1:5)
+
+top_5
+
+# now plotting their answers to evaluate which one has a clear trend 
+
+ids5 <- top_5$id  
+
+imm_top5 <- imm_no_NA %>%
+  filter(id %in% ids5) %>%
+  arrange(id, wave)
+
+ggplot(imm_top5, aes(x = wave, y = imm, color = factor(id))) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    x = "Wave",
+    y = "imm",
+    color = "ID"
+  ) +
+  theme_minimal()
+
+# ID                  Diff.  Abs.Diff
+# R_1QmjdeOBiWUpkdb		-3.8  	3.8 I will Choose this participant since it displays a clear trend in the graph
+# R_3NL19QNSRRBkC74		-3.2	  3.2 
+# R_1f2hKRyokGO2W3r		-2.2  	2.2 
+# R_3kNRfUpDAP5boUq		-2.2  	2.2
+# R_1plJyb0khylur8Z 	-1.8  	1.8	
+
+
+
+
+```
+
+
+now that we have chosen our participant (R_1QmjdeOBiWUpkdb) we can proceed with preparing the data
+
+```{r}
+
+person_id <- "R_1QmjdeOBiWUpkdb"
+
+
+# Select particpant data
+y_data_p1 <- y_data[person_id, , ]
+
+# prepare 1 observed item
+
+data_observed <- list(
+  Nt = num_time, 
+  y = y_data_p1[, 3] # imm is item 3 
+)
+
+# prepare data 1 factor 3 items 
+data_latent <- list(
+  Nt = num_time, 
+  y = y_data_p1[, 1:3]
+)
+
+```
+
+
+## Model and interpretation 
+
+Now we proceed to run the AR1 model with 1 person and 1 item
+
+
+```{r}
+
+# Estimating AR1 with 1 person and 1 item 
+
+# parameters to estimate 
+params_observed <- c("alpha", "beta", "sigma.y")
+
+model1 <- jags.parallel(
+  data = data_observed, 
+  parameters.to.save = params_observed,
+  n.iter = 10000, 
+  n.chains = 4,
+  n.thin = 1, 
+  n.burnin = 5000,
+  model.file = here("models", "AR 1 (1).txt")
+)
+
+est1 <- model1$BUGSoutput$summary
+round(est1, 2)
+
+
+# results
+#           mean   sd  2.5%   25%   50%   75% 97.5% Rhat n.eff
+# alpha    -0.98 0.46 -1.73 -1.25 -1.03 -0.78  0.15    1  7300
+# beta      0.51 0.20  0.11  0.37  0.51  0.65  0.91    1 12000
+# deviance 65.44 2.54 62.37 63.51 64.85 66.78 71.80    1 19000
+# sigma.y   0.78 0.23  0.45  0.61  0.74  0.90  1.35    1 20000
+
+# negative alpha (and a large absolute value) indicating a low mean
+# beta is moderately large and the credible interval doesn't go over 0
+# residual is also moderately large 
+
+
+# Check for the minimal effective sample size (validate convergence)
+min(est1[est1[, "n.eff"] > 1, "n.eff"])
+# output: 7300 -> good
+
+# Check for smallest Rhat statistic (validate convergence)
+max(est1[est1[, "n.eff"] > 1, "Rhat"])
+# output: 1.001241 -> good
+
+
+```
+We can see evidence of a temporal dependence due to a moderately large autorregressive coefficient (beta mean = 0.75)
+
+# Analysis 2: AR(1) Model with three items and one factor (1 person) 
+
+Now we proceed with the three item, 1 latent factor AR(1) model, still with 1 person 
+
+```{r}
+
+# Estimating AR1 with 1 person and 1 factor 
+
+# parameters to estimate 
+params_latent <- c(
+  "alpha", "beta", "lambda.y", "lambda.y.strd", "nu.y",
+  "sigma.y", "sigma.eta"
+)
+
+
+model2 <- jags.parallel(
+  data = data_latent, 
+  parameters.to.save = params_latent, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "AR 1 (2).txt")
+)
+
+est2 <- model2$BUGSoutput$summary
+round(est2, 2)
+
+
+## Results:                    
+#                    mean    sd   2.5%    25%    50%    75%  97.5% Rhat n.eff
+# alpha             -0.51  0.29 -0.91  -0.67  -0.56  -0.42   0.33    1  3900
+# beta               0.34  0.39 -0.46   0.07   0.36   0.64   0.96    1 20000
+# deviance         114.52 10.05 95.63 107.47 114.25 121.31 134.82    1 18000
+# lambda.y[1]        0.36  0.37 -0.40   0.13   0.37   0.60   1.07    1 11000
+# lambda.y[2]        0.70  0.81 -0.98   0.17   0.74   1.28   2.17    1  9800
+# lambda.y.strd[1]   0.68  0.08  0.51   0.62   0.68   0.74   0.83    1  5400
+# lambda.y.strd[2]   0.30  0.28 -0.35   0.12   0.33   0.51   0.74    1  5700
+# lambda.y.strd[3]   0.30  0.33 -0.44   0.08   0.33   0.55   0.82    1  9400
+# nu.y[1]           -0.35  0.24 -0.84  -0.51  -0.35  -0.20   0.13    1 15000
+# nu.y[2]           -0.70  0.52 -1.77  -1.05  -0.69  -0.34   0.30    1 17000
+# sigma.eta          0.20  0.08  0.10   0.15   0.18   0.23   0.39    1  5000
+# sigma.y[1]         0.23  0.09  0.11   0.17   0.21   0.27   0.44    1 12000
+# sigma.y[2]         0.21  0.07  0.12   0.17   0.20   0.25   0.38    1 20000
+# sigma.y[3]         0.78  0.28  0.33   0.59   0.74   0.93   1.43    1 10000
+
+# intercept alpha is lower abs value than 1 item structure 
+# lower beta, but still moderate coefficient. interval goes over 0 
+# moderately high to low std. factor loadings: abort[1]= 0.68; adopt[2]= 0.30; imm[3]= 0.30
+
+
+
+# Check for the minimal effective sample size (validate convergence)
+min(est2[est2[, "n.eff"] > 1, "n.eff"])
+# output: 3900 -> good 
+
+# Check for smallest Rhat statistic (validate convergence)
+max(est2[est2[, "n.eff"] > 1, "Rhat"])
+# output: 1.00276 -> good 
+
+
+```
+
+## ARMA model testing
+
+We also explore the possibility of an ARMA model since the code was already included in the appendix of the tutorial; however the results indicate the gamma factor to be essentially 0 in the one factor model;
+
+```{r}
+
+# Estimating ARMA with 1 person and 1 item 
+
+# parameters to estimate 
+params_observed_arma <- c("alpha", "beta", "gamma", "sigma.y")
+
+model1b <- jags.parallel(
+  data = data_observed, 
+  parameters.to.save = params_observed_arma,
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "ARMA.txt")
+)
+est1b <- model1b$BUGSoutput$summary
+round(est1b, 2)
+
+## results
+#           mean   sd  2.5%   25%   50%   75%  97.5% Rhat n.eff
+# alpha    -0.68 0.65 -1.62 -1.14 -0.84 -0.33  0.86 1.00  1500
+# beta      0.65 0.39 -0.48  0.50  0.79  0.93  1.00 1.01   630
+# deviance 64.15 2.92 59.86 62.04 63.63 65.76 71.11 1.00  1500
+# gamma    -0.23 0.38 -0.74 -0.50 -0.31 -0.03  0.76 1.00   670
+# sigma.y   0.74 0.23  0.42  0.58  0.70  0.86  1.30 1.00 15000
+
+
+
+
+# Estimating ARMA with 1 person and 1 factor (3 items)
+
+# parameters to estimate 
+params_latent_arma <- c(
+  "alpha", "beta", "gamma", "lambda.y", "lambda.y.strd",
+  "nu.y", "sigma.y", "sigma.eta"
+)
+
+model2b <- jags.parallel(
+  data = data_latent, 
+  parameters.to.save = params_latent_arma,
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "ARMA(1factor).txt")
+)
+est2b <- model2b$BUGSoutput$summary
+round(est2b, 2)
+
+#results 
+
+#                    mean    sd   2.5%    25%    50%    75%  97.5% Rhat n.eff
+# alpha             -0.52  0.27 -0.92  -0.67  -0.57  -0.44   0.23    1  1300
+# beta               0.25  0.54 -0.83  -0.17   0.32   0.74   0.98    1   830
+# deviance         114.94 10.11 95.75 108.02 114.63 121.63 135.54    1  6700
+# gamma              0.04  0.49 -0.82  -0.35   0.03   0.42   0.91    1  5100
+# lambda.y[1]        0.35  0.37 -0.43   0.12   0.36   0.59   1.06    1  2000
+# lambda.y[2]        0.66  0.81 -1.01   0.12   0.69   1.23   2.14    1  2700
+# lambda.y.strd[1]   0.68  0.08  0.51   0.62   0.68   0.74   0.83    1  2700
+# lambda.y.strd[2]   0.28  0.29 -0.37   0.11   0.32   0.50   0.74    1  2200
+# lambda.y.strd[3]   0.28  0.34 -0.45   0.05   0.31   0.53   0.82    1  2400
+# nu.y[1]           -0.36  0.25 -0.87  -0.52  -0.36  -0.20   0.12    1  2800
+# nu.y[2]           -0.73  0.53 -1.77  -1.07  -0.71  -0.37   0.27    1  2900
+# sigma.eta          0.20  0.07  0.10   0.15   0.18   0.23   0.37    1 13000
+# sigma.y[1]         0.23  0.09  0.11   0.17   0.21   0.27   0.44    1  3100
+# sigma.y[2]         0.21  0.07  0.12   0.17   0.20   0.25   0.38    1 20000
+# sigma.y[3]         0.79  0.28  0.34   0.59   0.75   0.94   1.43    1  1100
+
+```
+
+## Convergence checks 
+
+
+```{r}
+# Convergence of AR Model 1 item 
+
+model1_conv <- jags.parallel(
+  data = data_observed,
+  parameters.to.save = params_observed, 
+  n.iter = 10000,
+  n.chains = 4, 
+  n.thin = 1,
+  n.burnin = 1, 
+  model.file = here("models", "AR 1 (1).txt")
+)
+samps1 <- as.mcmc(model1_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","AR1_gelmanplot.pdf"))
+# good
+
+par(new = FALSE)
+for (v in 1:nvar(samps1)) {
+  gelman.plot(samps1[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = TRUE)
+}
+abline(h = 1.1)
+dev.off() 
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","AR1_xyplot.pdf"), pointsize = 6)
+# single peaks, beta has a slightly wider density curve, but still a single peak
+
+plot(samps1)
+dev.off() 
+
+
+# Convergence of AR Model 1 factor 
+
+model2_conv <- jags.parallel(
+  data = data_latent, 
+  parameters.to.save = params_latent,
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 1, 
+  model.file = here("models", "AR 1 (2).txt")
+)
+
+samps2 <- as.mcmc(model2_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","AR2_gelmanplot.pdf"))
+# good
+
+par(new = FALSE)
+for (v in 1:nvar(samps2)) {
+  gelman.plot(samps2[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = TRUE)
+}
+abline(h = 1.1)
+dev.off()
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","AR2_xyplot.pdf"), pointsize = 6)
+# good, but beta has a strnage wide density curve not uniform on both sides, but still a single peak.....
+
+plot(samps2)
+dev.off() 
+```
+
+

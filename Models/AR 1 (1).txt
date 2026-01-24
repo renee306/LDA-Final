@@ -1,0 +1,29 @@
+
+# AR(1) Model with single item (1 person)
+
+model{
+
+  # Observation model
+  for(t in 1:Nt){
+    y[t] ~ dnorm(mu.y[t], psi.y)
+  }
+
+  # AR(1) mean structure
+  mu.y[1] <- alpha
+
+  for(t in 2:Nt){
+    y.center[t-1] <- y[t-1] - alpha
+    mu.y[t] <- alpha + beta * y.center[t-1]
+  }
+
+  # Residual precision
+  psi.y ~ dgamma(1, 1)
+
+  # Time-series parameters
+  alpha ~ dnorm(0, 0.1)
+  beta ~ dunif(-1, 1)
+
+  # Variance transformation
+  sigma.y <- 1 / psi.y
+
+}

@@ -1,0 +1,66 @@
+
+
+
+# CFA model 1 factor 3 items 
+
+model{
+
+  # Measurement model
+  for(i in 1:N){
+
+    # Observation model
+    for(j in 1:J){
+      y[i, j] ~ dnorm(mu.y[i, j], psi.y[j])
+    }
+
+    # Latent factor
+    eta[i, 1] ~ dnorm(mu.eta[1], psi.eta[1, 1])
+
+    # Single-factor structure
+    # First indicator fixed for identification
+    mu.y[i, 1] <- eta[i, 1]
+    mu.y[i, 2] <- nu.y[1] + lambda.y[1] * eta[i, 1]
+    mu.y[i, 3] <- nu.y[2] + lambda.y[2] * eta[i, 1]
+  }
+
+  # Priors for residual precisions
+  for(j in 1:J){
+    psi.y[j] ~ dgamma(1, 1)
+  }
+
+  # Prior for latent factor mean
+  mu.eta[1] ~ dnorm(0, 0.01)
+
+  # Prior for latent factor precision
+  psi.eta[1,1] ~ dgamma(1, 1)
+
+  # Free loadings and intercepts
+  for(l in 1:2){
+    lambda.y[l] ~ dnorm(0.5, 1)
+    nu.y[l] ~ dnorm(0, 0.01)
+  }
+
+  # Convert precisions to variances
+  for(j in 1:J){
+    sigma.eps[j] <- 1 / psi.y[j]
+  }
+
+  sigma.eta[1,1] <- 1 / psi.eta[1,1]
+
+  # Standardized factor loadings
+  lambda.y.strd[1] <- (
+    sqrt(sigma.eta[1,1]) /
+    sqrt(sigma.eta[1,1] + sigma.eps[1])
+  )
+
+  lambda.y.strd[2] <- (
+    lambda.y[1] * sqrt(sigma.eta[1,1]) /
+    sqrt(lambda.y[1]^2 * sigma.eta[1,1] + sigma.eps[2])
+  )
+
+  lambda.y.strd[3] <- (
+    lambda.y[2] * sqrt(sigma.eta[1,1]) /
+    sqrt(lambda.y[2]^2 * sigma.eta[1,1] + sigma.eps[3])
+  )
+
+}

@@ -1,0 +1,394 @@
+---
+title: "LDA MLM and DSEM"
+author: "Renee Soler"
+output: html_document
+---
+
+## Data Preparation
+
+```{r}
+library(R2jags)
+library(here)
+
+## Data Preparation
+
+table <- read.csv(here("yllanon.csv"))
+
+
+data <- table
+
+id_var  <- "id"
+time_var <- "wave"
+item_vars <- c("abort","adopt","imm") 
+
+# removing "dont know" and "I haven’t thought much about it" responses
+
+data$abort[data$abort %in% c(5, 6)] <- NA
+
+data$adopt[data$adopt %in% c(8, 9)] <- NA
+
+data$imm[data$imm %in% c(8, 9)] <- NA
+
+#reversing abortion and adoption variables since they point opposite the construct of conservative cultural shift
+
+data$abort <- 5 - data$abort
+data$adopt <- 8 - data$adopt
+
+
+# centering data because the tutorial data is centered and im trying to fix low ESS (online it said this should help)
+
+# Compute wave-1 means
+wave1_means <- sapply(item_vars, function(v) {
+  mean(data[data$wave == 1, v], na.rm = TRUE)
+})
+
+# Center all waves using wave-1 means
+for (v in item_vars) {
+  data[[v]] <- data[[v]] - wave1_means[v]
+}
+
+# had to scale every item to unit of std. dev. since i had issues with cnvergence down the line in MLM, and if i scale the models are no longer comaprable so we have to scale from the start.
+
+item_sds <- sapply(item_vars, function(v) sd(data[[v]], na.rm = TRUE))
+
+for (v in item_vars) {
+  data[[v]] <- data[[v]] / item_sds[v]
+}
+
+## data in tutorial is in 3 dimensions and ours is in long format so im reshaping so its easier to use down the line. 
+ 
+
+# Unique ids and waves
+ids   <- sort(unique(data[[id_var]]))
+times <- sort(unique(data[[time_var]]))
+
+N <- length(ids)
+T <- length(times)
+J <- length(item_vars)
+
+# array [person, time, item]
+y_data <- array(NA_real_, dim = c(N, T, J),
+                dimnames = list(ids, times, item_vars))
+
+for (j in seq_along(item_vars)) {
+  tmp <- data[, c(id_var, time_var, item_vars[j])]
+  names(tmp) <- c("id", "time", "y")
+
+  wide <- reshape(tmp, idvar = "id", timevar = "time", direction = "wide")
+
+  wide <- wide[match(ids, wide$id), , drop = FALSE]
+  col_order <- paste0("y.", times)
+
+  y_data[, , j] <- as.matrix(wide[, col_order])
+}
+
+
+# Save the number participants (N=552)
+
+num_obs  <- dim(y_data)[1]
+
+# Save the number of time points (num_time=26)
+
+num_time <- dim(y_data)[2]
+
+# Number of items (3)
+
+num_items <- dim(y_data)[3]
+
+```
+
+
+# Model 1: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope 
+
+So now we want to measure instead of just 1 person, every individual in our dataset, and give them their own random intercept (baseline level opinion) and slope (development/trend of their opinion). We again start with 1 item, we will choose imm as in the exercise before. 
+
+
+```{r}
+# Prepare data for jags
+data_prepared <- list(
+  N = num_obs, 
+  Nt = num_time, 
+  y = y_data[, , 3], # responses to item 3
+  psi0 = diag(2), 
+  mu.eps2 = rep(0, 2)  
+)
+
+# parameter estimation
+params_model1 <- c("alpha", "beta", "sigma.y", "sigma.eps2", "rho.eps2")
+
+model1 <- jags.parallel(
+  data = data_prepared,
+  parameters.to.save = params_model1, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file = here("models", "mlm 1.txt")
+)
+est1 <- model1$BUGSoutput$summary
+round(est1, 2)
+
+#results 
+
+#                     mean    sd     2.5%      25%      50%      75%    97.5% Rhat n.eff
+
+# alpha              -0.09  0.04    -0.15    -0.11    -0.09    -0.06    -0.01 1.03   180
+# beta                0.28  0.02     0.24     0.27     0.28     0.29     0.32 1.01   470
+# deviance        12146.30 51.28 12048.40 12110.87 12145.18 12180.94 12249.11 1.00 10000
+# rho.eps2[1,1]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# rho.eps2[2,1]      -0.04  0.08    -0.20    -0.10    -0.04     0.01     0.11 1.00  1300
+# rho.eps2[1,2]      -0.04  0.08    -0.20    -0.10    -0.04     0.01     0.11 1.00  1300
+# rho.eps2[2,2]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# sigma.eps2[1,1]     0.77  0.05     0.68     0.73     0.76     0.80     0.87 1.00  7400
+# sigma.eps2[2,1]    -0.01  0.02    -0.05    -0.02    -0.01     0.00     0.03 1.00  1100
+# sigma.eps2[1,2]    -0.01  0.02    -0.05    -0.02    -0.01     0.00     0.03 1.00  1100
+# sigma.eps2[2,2]     0.07  0.01     0.05     0.06     0.07     0.07     0.08 1.01   260
+# sigma.y             0.19  0.00     0.18     0.19     0.19     0.19     0.19 1.00 10000
+
+
+
+```
+
+So i had to go back and scale the observed items since I was getting slow convergence and bad Rhat, but now it has improved 
+
+### Interpretation
+
+ - alpha: negative avg baseline with credible interval below 0
+ - beta: positive avg AR effect with credible interval not crossing 0
+ - sigma.eps2[1,1]: (variance of random intercepts) high between person baseline variability
+ - sigma.eps2[2,2]: (variance of random slopes) low variability in temporal trends between persons
+ - rho.eps2[2,1]: low correlation between random slope and intercept
+ - sigma.y: moderate within-person unexplained variability
+
+
+# Model 2: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope and time specific random slope 
+
+Now we include the effect of time trends (time-specific random slope), to see if we can capture the effect of the situation at the time around the participants in their changing opinion through the waves. 
+
+
+```{r}
+
+# model estimation
+params_model2 <- c("alpha", "beta", "sigma.y", "sigma.eps2", "rho.eps2", "sigma.eps3"
+)
+
+model2 <- jags.parallel(
+  data = data_prepared, 
+  parameters.to.save = params_model2, 
+  n.iter = 10000,
+  n.chains = 4, 
+  n.thin = 1,
+  n.burnin = 5000, 
+  model.file =  here("models", "mlm 2.txt")
+)
+
+est2 <- model2$BUGSoutput$summary
+round(est2, 2)
+
+# results: 
+
+#                     mean    sd     2.5%      25%      50%      75%    97.5% Rhat n.eff
+# alpha              -0.09  0.04    -0.16    -0.11    -0.08    -0.06    -0.02 1.11    31
+# beta                0.29  0.07     0.16     0.24     0.28     0.33     0.43 1.01   260
+# deviance        12042.91 50.40 11945.65 12008.15 12042.89 12076.73 12143.05 1.00   660
+# rho.eps2[1,1]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# rho.eps2[2,1]      -0.05  0.08    -0.20    -0.10    -0.05     0.01     0.12 1.01   340
+# rho.eps2[1,2]      -0.05  0.08    -0.20    -0.10    -0.05     0.01     0.12 1.01   340
+# rho.eps2[2,2]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# sigma.eps2[1,1]     0.77  0.05     0.68     0.74     0.77     0.80     0.87 1.00  5300
+# sigma.eps2[2,1]    -0.01  0.02    -0.04    -0.02    -0.01     0.00     0.03 1.01   350
+# sigma.eps2[1,2]    -0.01  0.02    -0.04    -0.02    -0.01     0.00     0.03 1.01   350
+# sigma.eps2[2,2]     0.06  0.01     0.05     0.06     0.06     0.07     0.08 1.00  1800
+# sigma.eps3          0.13  0.04     0.07     0.09     0.12     0.15     0.24 1.00  1600
+# sigma.y             0.19  0.00     0.18     0.18     0.19     0.19     0.19 1.00  3800
+
+```
+### Interpretation
+
+Results of between-person random slope/intercept, and AR effects very similar to previous model. Residuals of between-person level are pretty much the same. 
+
+The random time-specific slope (sigma.eps3) is positive, with credible interval not overlapping 0 and good ESS.
+
+
+I wanted to increase the number of iterations to hopefully improve convergence, but doubling them to 20k didn't do much for improving convergence , and adding more iterations  was taking too long and I never got to see results, so instead I went with scaling the data and re-running all models. In the end scaling the data solved the problems I was seeing. 
+
+# Model 3: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope and time specific random slope and intercept
+
+Now we want to try adding a time-specific intercept to model the time shocks that were shared by all participants but varied during waves
+
+```{r}
+
+#model estimation 
+params_model3 <- c(
+  "alpha","beta","sigma.y","sigma.eps2","rho.eps2","sigma.eps3","sigma.delta"
+)
+
+model3 <- jags.parallel(
+  data = data_prepared, 
+  parameters.to.save = params_model3, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 5000, 
+  model.file =  here("models", "mlm 3.txt")
+)
+
+est3 <- model3$BUGSoutput$summary
+round(est3, 2)
+
+# results 
+
+#                     mean    sd     2.5%      25%      50%      75%    97.5% Rhat n.eff
+# alpha              -0.02  0.04    -0.10    -0.05    -0.02     0.01     0.06 1.05    55
+# beta                0.29  0.07     0.15     0.24     0.29     0.34     0.43 1.01  1200
+# deviance        11898.22 50.80 11801.13 11863.64 11897.47 11932.14 11999.16 1.00  8100
+# rho.eps2[1,1]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# rho.eps2[2,1]      -0.03  0.08    -0.19    -0.09    -0.04     0.02     0.13 1.01   350
+# rho.eps2[1,2]      -0.03  0.08    -0.19    -0.09    -0.04     0.02     0.13 1.01   350
+# rho.eps2[2,2]       1.00  0.00     1.00     1.00     1.00     1.00     1.00 1.00     1
+# sigma.delta         0.09  0.03     0.05     0.07     0.09     0.11     0.16 1.00 14000
+# sigma.eps2[1,1]     0.78  0.05     0.69     0.74     0.78     0.81     0.88 1.00 20000
+# sigma.eps2[2,1]    -0.01  0.02    -0.04    -0.02    -0.01     0.00     0.03 1.01   350
+# sigma.eps2[1,2]    -0.01  0.02    -0.04    -0.02    -0.01     0.00     0.03 1.01   350
+# sigma.eps2[2,2]     0.06  0.01     0.05     0.06     0.06     0.07     0.08 1.02   180
+# sigma.eps3          0.12  0.04     0.06     0.09     0.11     0.14     0.21 1.00  1400
+# sigma.y             0.18  0.00     0.18     0.18     0.18     0.19     0.19 1.00  7800
+
+```
+## interpretation
+
+We can observe the estimates stay pretty similar to the previous model. 
+
+The mean of the coefficient for the time-specific intercept (sigma.delta = 0.09) is other than zero, with a credible interval above 0. We decide to keep it moving forward to the DSEM.
+ 
+ 
+
+### Convergence Checks 
+
+```{r}
+
+# convergence check Model 1: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope 
+
+model1_conv <- jags.parallel(
+  data = data_prepared,
+  parameters.to.save = params_model1, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1,
+  n.burnin = 1, 
+  model.file = here("models", "mlm 1.txt")
+)
+
+samps1 <- as.mcmc(model1_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","mlm1_gelmanplot.pdf"))
+# all good except alpha shrik factor 
+
+par(new = FALSE)
+for (v in 1:nvar(samps1)) {
+  gelman.plot(samps1[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = TRUE)
+}
+
+abline(h = 1.1)
+dev.off()
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","mlm1_xyplot.pdf"), pointsize = 6)
+# bad mixing of alpha! 
+
+plot(samps1)
+dev.off() 
+
+
+# convergence check Model 2: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope and time specific random slope 
+
+
+model2_conv <- jags.parallel(
+  data = data_prepared, 
+  parameters.to.save = params_model2, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 1, 
+  model.file =  here("models", "mlm 2.txt")
+)
+
+# Create Markov Chain Monte Carlo samples
+samps2 <- as.mcmc(model2_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","mlm2_gelmanplot.pdf"))
+# looks better than model 1 
+
+
+par(new = F)
+for (v in 1:nvar(samps2)) {
+  gelman.plot(samps2[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = T)
+}
+abline(h = 1.1)
+dev.off() #
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","mlm2_xyplot.pdf"), pointsize = 6)
+# still bad mixing of alpha, but density plot is more centered and has a single peak than model 1, beta starts to look a bit worse 
+
+
+plot(samps2)
+dev.off() 
+
+
+# convergence check # Model 3: MLM with one item, 2 levels, AR(1) with person-specific random intercept and slope and time specific random slope and intercept
+
+
+model3_conv <- jags.parallel(
+  data = data_prepared, 
+  parameters.to.save = params_model3, 
+  n.iter = 10000, 
+  n.chains = 4, 
+  n.thin = 1, 
+  n.burnin = 1, 
+  model.file =  here("models", "mlm 3.txt")
+)
+
+
+# Create Markov Chain Monte Carlo samples
+samps3 <- as.mcmc(model3_conv)
+
+# Create Gelman-Rubin diagnostic plots
+pdf(here("Convergence checks","mlm3_gelmanplot.pdf"))
+# looks okay
+
+par(new = F)
+for (v in 1:nvar(samps3)) {
+  gelman.plot(samps3[, v], ylim = c(0, 7), col = c("black", NA))
+  par(new = T)
+}
+abline(h = 1.1)
+dev.off() 
+
+# Create trace plots and density plots for each parameter
+pdf(here("Convergence checks","mlm3_xyplot.pdf"), pointsize = 6)
+# looks better than model 2, alpha and beta have good density plots, mixing is better, still not as perfect as the AR models
+
+plot(samps3)
+dev.off() 
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
