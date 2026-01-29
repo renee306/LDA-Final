@@ -1,0 +1,257 @@
+---
+title: "DSEM_LDA"
+output: html_document
+date: "2026-01-18"
+---
+## Data Preparation
+
+```{r}
+library(R2jags)
+library(here)
+
+## Data Preparation
+
+table <- read.csv("D:/Tübingen Uni/Longitudinal Data Analysis/Replication Package/yll/yllanon.csv")
+
+data <- table
+
+id_var  <- "id"
+time_var <- "wave"
+item_vars <- c("abort","adopt","imm") 
+cov_vars    <- c("gender","ethnic","edu","inc","age","state","relig") #possible covariates if we need)
+
+# removing "dont know" and "I haven’t thought much about it" responses
+
+data$abort[data$abort %in% c(5, 6)] <- NA
+
+data$adopt[data$adopt %in% c(8, 9)] <- NA
+
+data$imm[data$imm %in% c(8, 9)] <- NA
+
+#reversing abortion and adoption variables since they point opposite the construct of conservative cultural shift
+
+data$abort <- 5 - data$abort
+data$adopt <- 8 - data$adopt
+
+
+# centering data 
+
+# Compute wave-1 means
+wave1_means <- sapply(item_vars, function(v) {
+  mean(data[data$wave == 1, v], na.rm = TRUE)
+})
+
+# Center all waves using wave-1 means
+for (v in item_vars) {
+  data[[v]] <- data[[v]] - wave1_means[v]
+}
+
+# scaling items to std.dev
+
+item_sds <- sapply(item_vars, function(v) sd(data[[v]], na.rm = TRUE))
+
+for (v in item_vars) {
+  data[[v]] <- data[[v]] / item_sds[v]
+}
+
+# reshaping the format
+ 
+
+# Unique ids and waves
+ids   <- sort(unique(data[[id_var]]))
+times <- sort(unique(data[[time_var]]))
+
+N <- length(ids)
+T <- length(times)
+J <- length(item_vars)
+
+# array [person, time, item]
+y_data <- array(NA_real_, dim = c(N, T, J),
+                dimnames = list(ids, times, item_vars))
+
+for (j in seq_along(item_vars)) {
+  tmp <- data[, c(id_var, time_var, item_vars[j])]
+  names(tmp) <- c("id", "time", "y")
+
+  wide <- reshape(tmp, idvar = "id", timevar = "time", direction = "wide")
+
+  wide <- wide[match(ids, wide$id), , drop = FALSE]
+  col_order <- paste0("y.", times)
+
+  y_data[, , j] <- as.matrix(wide[, col_order])
+}
+
+
+# Save the number participants (N=552)
+
+num_obs  <- dim(y_data)[1]
+
+# Save the number of time points (num_time=26)
+
+num_time <- dim(y_data)[2]
+
+# Number of items (3)
+
+num_items <- dim(y_data)[3]
+
+```
+
+```{r}
+# Prepare data for one factor
+data_1factor <- list(
+  N = num_obs, # sample size
+  Nt = num_time, # time points
+  y = y_data[, , 1:3], # responses to items 1 to 3
+  psi0 = diag(2), # hyperprior wishart distribution
+  mu.zeta2 = rep(0, 2) # hyperprior multivariate normal distribution
+)
+```
+
+```{r}
+# Define the factor structure for standardization
+factor_structure <- data.frame(
+  indicator = 1:3,
+  factor = rep(1, 3),
+  loading_id = c(NA, 1, 2)  # first is fixed
+)
+```
+
+
+################################################################################
+# MODEL 1:  One-factor AR(1) with person-specific random intercept
+#           and slope
+################################################################################
+
+```{r}
+# Define parameters which are being estimated
+params_model1 <- c(
+  "alpha", "beta", "lambda.y", "nu.y", "sigma.y", "sigma.eta",
+  "sigma.zeta2", "rho.zeta2", "sigma.zeta3", "sigma.delta"
+)
+```
+# alpha: first AR(1) parameter (random intercept/baseline value)
+# beta: second AR(1) parameter (slope/autoregressive coefficient)
+# lambda.y: factor loadings
+# lambda.y.strd: standardized factor loadings
+# nu.y: factor intercepts
+# sigma.y: variance of the residuals
+# sigma.eta: variance of the latent factor
+# sigma.zeta2: variance of the random effects
+# rho.zeta2: correlation matrix  of the random effects
+
+```{r}
+# Run jags model for items 10-12 (all BAI indicators)
+model1 <- jags.parallel(
+  data = data_1factor, # data to use
+  parameters.to.save = params_model1, # output parameters
+  n.iter = 10000, # number of iterations
+  n.chains = 4, # number of chains
+  n.thin = 1, # number of iterations to skip
+  # for avoiding autocorrelation (in this case None)
+  n.burnin = 5000, # burn-in parameter
+  model.file = "D:/Tübingen Uni/Longitudinal Data Analysis/Project/dsem_1.txt"
+  )
+```
+
+```{r}
+# Store parameter estimates
+est1 <- model1$BUGSoutput$summary
+# Print parameter estimates
+round(est1, 2)
+```
+
+```{r}
+# Print correlation matrix of the random effects
+round(matrix(est1[c(
+  paste0("rho.zeta2[", 1:2, ",1]"),
+  paste0("rho.zeta2[", 1:2, ",2]")
+), "mean"], 2, 2), 3)
+```
+# SOME INTERPRETATION
+# -> Positive correlation between random slope and intercept which implies
+#    that people with a higher starting / baseline value experience
+#    a sharper increase
+
+```{r}
+# Load utility functions from GitHub code
+source("D:/Tübingen Uni/Longitudinal Data Analysis/Project/standardization.R")
+```
+
+```{r}
+# Calculate standardized factor loadings (see code in utils/standardization.R)
+result_model1 <- run_factor_analysis_map(
+  est = est1,
+  factor_structure = factor_structure,
+  n_factors = 1,
+  person_intercept_var_name = c("sigma.zeta2[1,1]"),
+  person_slope_var_name = c("sigma.zeta2[2,2]")
+)
+print_analysis_results(result_model1)
+```
+
+The factor loading of the first item is unrealistically high, while the third item has a very low factor loading. 
+
+################################################################################
+# MODEL 2: One-factor AR(1) with person-specific intercept + slope
+#          and time-specific random slope
+################################################################################
+
+```{r}
+# Define parameters which are being estimated
+params_model2 <- c(
+  "alpha", "beta", "lambda.y", "nu.y", "sigma.y", "sigma.eta",
+  "sigma.zeta2", "rho.zeta2", "sigma.zeta3"
+)
+```
+
+# alpha: first AR(1) parameter (random intercept/baseline value)
+# beta: second AR(1) parameter (slope/autoregressive coefficient)
+# lambda.y: factor loadings
+# lambda.y.strd: standardized factor loadings
+# nu.y: factor intercepts
+# sigma.y: variance of the residuals
+# sigma.eta: variance of the latent factor
+# sigma.zeta2: variance of the person-specific random effects
+# rho.zeta2: correlation matrix  of the random effects
+# sigma.zeta3: variance of the time-specific random effects
+
+```{r}
+# Run jags model for items 10-12 (all BAI indicators)
+model2 <- jags.parallel(
+  data = data_1factor, # data to use
+  parameters.to.save = params_model2, # output parameters
+  n.iter = 10000, # number of iterations
+  n.chains = 4, # number of chains
+  n.thin = 1, # number of iterations to skip
+  # for avoiding autocorrelation (in this case None)
+  n.burnin = 5000, # burn-in parameter
+  model.file = "D:/Tübingen Uni/Longitudinal Data Analysis/Project/dsem_2.txt"
+)
+```
+
+```{r}
+file.exists("D:/Tübingen Uni/Longitudinal Data Analysis/Project/dsem_model1_1factor_ar1_cross.txt")
+```
+
+
+```{r}
+# Store parameter estimates
+est2 <- model2$BUGSoutput$summary
+# Print parameter estimates
+round(est2, 2)
+```
+
+```{r}
+# Calculate standardized factor loadings (see code in utils/standardization.R)
+result_model2 <- run_factor_analysis_map(
+  est = est2,
+  factor_structure = factor_structure,
+  n_factors = 1,
+  person_intercept_var_name = c("sigma.zeta2[1,1]"),
+  person_slope_var_name = c("sigma.zeta2[2,2]"),
+  time_slope_var_name = c("sigma.zeta3")
+)
+print_analysis_results(result_model2)
+```
+
+The first factor loading is still unrealistically high. 
